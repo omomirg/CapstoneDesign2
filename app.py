@@ -4,11 +4,17 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import matplotlib
+import os
+from matplotlib import font_manager
 
-# ---- 한글 폰트 (맥 기준) ----
-plt.rcParams["font.family"] = "Apple SD Gothic Neo"
+# ---- 한글 폰트 (배포 서버용) ----
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+FONT_PATH = os.path.join(BASE_DIR, "fonts", "NanumGothic.ttf")
+
+# 폰트 등록
+font_manager.fontManager.addfont(FONT_PATH)
+plt.rcParams["font.family"] = "NanumGothic"
 plt.rcParams["axes.unicode_minus"] = False
-
 # -------------------------------
 # 기본 설정
 # -------------------------------
