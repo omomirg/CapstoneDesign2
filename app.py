@@ -3,18 +3,12 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-import matplotlib
-import os
-from matplotlib import font_manager
+import heapq
 
-# ---- 한글 폰트 (배포 서버용) ----
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-FONT_PATH = os.path.join(BASE_DIR, "fonts", "NanumGothic-Regular.ttf")
-
-# 폰트 등록
-font_manager.fontManager.addfont(FONT_PATH)
-plt.rcParams["font.family"] = "NanumGothic"
+# ---- 한글 폰트 ----
+plt.rcParams["font.family"] = "Apple SD Gothic Neo"
 plt.rcParams["axes.unicode_minus"] = False
+
 # -------------------------------
 # 기본 설정
 # -------------------------------
@@ -53,6 +47,8 @@ seed = st.sidebar.number_input(
 
 # 이 값 = 경로에 포함할 구역 수 (최소 2, 최대 12)
 path_len = st.sidebar.slider("예상 감염 경로에 포함할 구역 수", 2, 12, 6)
+route_alpha = 0
+
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("**입력 파일 포맷 예시**")
@@ -262,10 +258,11 @@ zone_map = zone_map.fillna(0)
 # -------------------------------
 # 5. 감염 경로 계산 함수 (값 + 거리 동시에 고려)
 # -------------------------------
+# 맨해튼 거리
 def manhattan_dist(r1, c1, r2, c2):
     return abs(r1 - r2) + abs(c1 - c2)
 
-
+# 그리디 알고리즘 
 def compute_infection_path(zone_stats, zone_map, max_zones=6):
     """
     값(severity_mean)과 거리(row, col)를 동시에 고려한 경로 생성.
@@ -327,6 +324,171 @@ def compute_infection_path(zone_stats, zone_map, max_zones=6):
         current = best_zone
 
     return path  # [start, ..., last]
+
+# -------------------------------
+# 5-1. Dijkstra / A* 경로 탐색 함수
+# -------------------------------
+
+def get_severity_norm():
+    """
+    각 구역의 평균 중증도 severity_mean을 0~1로 정규화.
+    경로 탐색 비용 계산에 사용.
+    """
+    max_sev = zone_map["severity_mean"].max()
+
+    if max_sev > 0:
+        sev_norm = zone_map.set_index("zone")["severity_mean"] / max_sev
+    else:
+        sev_norm = zone_map.set_index("zone")["severity_mean"] * 0
+
+    return sev_norm.to_dict()
+
+
+def get_neighbors(zone):
+    """
+    현재 zone에서 상하좌우로 인접한 구역만 반환.
+    예: A1의 이웃은 B1, A2
+    """
+    cur = zone_map[zone_map["zone"] == zone].iloc[0]
+    r, c = cur["row"], cur["col"]
+
+    temp = zone_map.copy()
+    temp["dist"] = abs(temp["row"] - r) + abs(temp["col"] - c)
+
+    neighbors = temp[temp["dist"] == 1]["zone"].tolist()
+
+    return neighbors
+
+
+def heuristic(a, b):
+    """
+    A*의 h(n): 현재 구역에서 목표 구역까지의 맨해튼 거리.
+    격자 이동이므로 맨해튼 거리를 사용.
+    """
+    za = zone_map[zone_map["zone"] == a].iloc[0]
+    zb = zone_map[zone_map["zone"] == b].iloc[0]
+
+    return abs(za["row"] - zb["row"]) + abs(za["col"] - zb["col"])
+
+
+def move_cost(next_zone, alpha=0.5):
+    """
+    이동 비용 w(u, v).
+
+    w(u, v) = 1 + α × (1 - severity_norm(v))
+
+    다음 구역의 중증도가 높을수록 severity_norm(v)가 커지고,
+    그러면 이동 비용이 작아진다.
+    즉, 중증도 높은 구역을 경로상에서 더 선호하게 된다.
+    """
+    sev_norm = get_severity_norm()
+    return 1 + alpha * (1 - sev_norm[next_zone])
+
+
+def search_path(start, goal, algorithm="dijkstra", alpha=0.5):
+    """
+    Dijkstra 또는 A*로 start → goal 경로를 찾는다.
+
+    Dijkstra:
+        f(n) = g(n)
+
+    A*:
+        f(n) = g(n) + h(n)
+    """
+    pq = []
+    heapq.heappush(pq, (0, start))
+
+    g = {start: 0}
+    parent = {start: None}
+    visited = set()
+
+    while pq:
+        _, current = heapq.heappop(pq)
+
+        if current in visited:
+            continue
+
+        visited.add(current)
+
+        if current == goal:
+            break
+
+        for nxt in get_neighbors(current):
+            new_g = g[current] + move_cost(nxt, alpha)
+
+            if new_g < g.get(nxt, float("inf")):
+                g[nxt] = new_g
+                parent[nxt] = current
+
+                if algorithm == "dijkstra":
+                    priority = new_g
+
+                elif algorithm == "astar":
+                    priority = new_g + heuristic(nxt, goal)
+
+                else:
+                    raise ValueError("algorithm은 'dijkstra' 또는 'astar'만 가능")
+
+                heapq.heappush(pq, (priority, nxt))
+
+    if goal not in parent:
+        return [], float("inf"), len(visited)
+
+    path = []
+    cur = goal
+
+    while cur is not None:
+        path.append(cur)
+        cur = parent[cur]
+
+    path.reverse()
+
+    return path, g[goal], len(visited)
+
+
+def get_algorithm_route(algorithm="proposed", max_steps=6, alpha=0.5):
+    """
+    기존 알고리즘 / Dijkstra / A* 경로를 계산.
+
+    비교 기준:
+    - 기존 Proposed 경로를 먼저 계산
+    - Proposed의 시작점과 마지막 도착점을 동일하게 사용
+    - Dijkstra와 A*는 같은 start → goal 사이에서 경로만 다르게 탐색
+    """
+    proposed_path = compute_infection_path(zone_stats, zone_map, max_zones=max_steps)
+
+    start_zone = proposed_path[0]
+    goal_zone = proposed_path[-1]
+
+    if algorithm == "proposed":
+        path = proposed_path
+
+        total_cost = 0
+        for i in range(len(path) - 1):
+            total_cost += move_cost(path[i + 1], alpha)
+
+        visited_count = len(path)
+
+    elif algorithm in ["dijkstra", "astar"]:
+        path, total_cost, visited_count = search_path(
+            start=start_zone,
+            goal=goal_zone,
+            algorithm=algorithm,
+            alpha=alpha
+        )
+
+    else:
+        raise ValueError("algorithm은 'proposed', 'dijkstra', 'astar' 중 하나여야 함")
+
+    return {
+        "algorithm": algorithm,
+        "path": path,
+        "start_zone": start_zone,
+        "goal_zone": goal_zone,
+        "total_cost": total_cost,
+        "visited_count": visited_count,
+        "path_length": max(0, len(path) - 1),
+    }
 
 # -------------------------------
 # 6. Heatmap 함수들
@@ -407,6 +569,190 @@ def plot_severity_with_arrow(max_steps=6):
     ax.set_yticklabels(["1", "2", "3", "4"])
     ax.set_xlabel("열 (A–C)")
     ax.set_ylabel("행 (1–4)")
+
+def plot_severity_with_algorithm(algorithm="proposed", max_steps=6, alpha=0.5):
+    """
+    기존 '평균 중증도 및 예상 감염 경로' 히트맵과 같은 형태.
+    단, path 계산 알고리즘만 Proposed / Dijkstra / A*로 변경.
+    """
+    result = get_algorithm_route(
+        algorithm=algorithm,
+        max_steps=max_steps,
+        alpha=alpha
+    )
+
+    path = result["path"]
+
+    if len(path) == 0:
+        st.error("경로를 계산할 수 없습니다.")
+        return
+
+    start_zone = path[0]
+    end_zone = path[-1]
+    mid_zones = path[1:-1]
+
+    # 기존 plot_severity_with_arrow와 동일하게 severity_mean 히트맵 사용
+    heat = zone_map.pivot(index="row", columns="col", values="severity_mean")
+
+    values = heat.values.astype(float)
+    vmin = float(np.nanmin(values))
+    vmax = float(np.nanmax(values))
+
+    fig, ax = plt.subplots(figsize=(4, 6))
+    im = ax.imshow(
+        heat.values,
+        origin="upper",
+        cmap="viridis",
+        vmin=vmin,
+        vmax=vmax
+    )
+
+    title_dict = {
+        "proposed": "평균 중증도 및 예상 감염 경로 - Proposed",
+        "dijkstra": "평균 중증도 및 예상 감염 경로 - Dijkstra",
+        "astar": "평균 중증도 및 예상 감염 경로 - A*",
+    }
+
+    ax.set_title(title_dict[algorithm])
+    ax.set_xticks([0, 1, 2])
+    ax.set_xticklabels(["A", "B", "C"])
+    ax.set_yticks([0, 1, 2, 3])
+    ax.set_yticklabels(["1", "2", "3", "4"])
+    ax.set_xlabel("열 (A–C)")
+    ax.set_ylabel("행 (1–4)")
+
+    # 기존과 동일하게 zone / 평균 중증도 / 단계 표시
+    for _, r in zone_map.iterrows():
+        ax.text(
+            r["col"],
+            r["row"],
+            f"{r['zone']}\n{r['severity_mean']:.2f}\n({r['stage_ABC']})",
+            ha="center",
+            va="center",
+            color="white",
+            fontsize=9,
+            weight="bold",
+        )
+
+    fig.colorbar(
+        im,
+        ax=ax,
+        label="평균 중증도 (0=정상, 2=상)",
+        fraction=0.035,
+        pad=0.02,
+    )
+
+    # 시작 구역: 초록 테두리
+    sr, sc = zone_map.loc[
+        zone_map["zone"] == start_zone,
+        ["row", "col"]
+    ].values[0]
+
+    ax.add_patch(
+        plt.Rectangle(
+            (sc - 0.5, sr - 0.5),
+            1,
+            1,
+            fill=False,
+            edgecolor="#00ff00",
+            linewidth=3,
+        )
+    )
+
+    # 중간 경로: 노란 점선 테두리
+    for z in mid_zones:
+        rr, cc = zone_map.loc[
+            zone_map["zone"] == z,
+            ["row", "col"]
+        ].values[0]
+
+        ax.add_patch(
+            plt.Rectangle(
+                (cc - 0.5, rr - 0.5),
+                1,
+                1,
+                fill=False,
+                edgecolor="#ffcc00",
+                linewidth=2,
+                linestyle="--",
+            )
+        )
+
+    # 마지막 구역: 빨간 테두리
+    er, ec = zone_map.loc[
+        zone_map["zone"] == end_zone,
+        ["row", "col"]
+    ].values[0]
+
+    ax.add_patch(
+        plt.Rectangle(
+            (ec - 0.5, er - 0.5),
+            1,
+            1,
+            fill=False,
+            edgecolor="red",
+            linewidth=3,
+        )
+    )
+
+    # 화살표
+    for i in range(len(path) - 1):
+        z_from = path[i]
+        z_to = path[i + 1]
+
+        r1, c1 = zone_map.loc[
+            zone_map["zone"] == z_from,
+            ["row", "col"]
+        ].values[0]
+
+        r2, c2 = zone_map.loc[
+            zone_map["zone"] == z_to,
+            ["row", "col"]
+        ].values[0]
+
+        ax.annotate(
+            "",
+            xy=(c2, r2),
+            xytext=(c1, r1),
+            arrowprops=dict(arrowstyle="->", color="red", lw=2.5),
+        )
+
+    st.pyplot(fig)
+
+    st.markdown(f"**알고리즘:** `{algorithm}`")
+    st.markdown(f"🟢 **출발 구역:** `{start_zone}`")
+    st.markdown(f"🔴 **마지막 예상 감염 구역:** `{end_zone}`")
+    st.markdown(f"🟡 **예상 감염 경로:** {' → '.join(path)}")
+    st.markdown(f"**총 이동 비용:** `{result['total_cost']:.3f}`")
+    st.markdown(f"**경로 길이:** `{result['path_length']}`")
+    st.markdown(f"**탐색 노드 수:** `{result['visited_count']}`")
+
+
+def compare_algorithm_table(max_steps=6, alpha=0.5):
+    """
+    Proposed / Dijkstra / A* 결과를 표로 비교.
+    """
+    rows = []
+
+    for alg in ["proposed", "dijkstra", "astar"]:
+        result = get_algorithm_route(
+            algorithm=alg,
+            max_steps=max_steps,
+            alpha=alpha
+        )
+
+        rows.append({
+            "algorithm": alg,
+            "path": " → ".join(result["path"]),
+            "path_length": result["path_length"],
+            "total_cost": result["total_cost"],
+            "visited_count": result["visited_count"],
+            "start_zone": result["start_zone"],
+            "goal_zone": result["goal_zone"],
+        })
+
+    compare_df = pd.DataFrame(rows)
+    st.dataframe(compare_df, use_container_width=True)
 
     # 각 칸에 zone / 평균 중증도 / 단계(A/B/C) 표시
     for _, r in zone_map.iterrows():
@@ -497,20 +843,60 @@ def plot_severity_with_arrow(max_steps=6):
 # -------------------------------
 # 7. 시각화 탭
 # -------------------------------
-st.markdown("### 4️⃣ 온실 병해·중증도 지도 및 감염 경로 시각화")
+st.markdown("### 4️⃣ 온실 병해·중증도 지도 및 감염 경로 알고리즘 비교")
 
-tab1, tab2, tab3 = st.tabs(
-    ["병해 발생 비율", "중증도 + 감염 경로", "중증도 상(high) 비율"]
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+    [
+        "병해 발생 비율",
+        "Proposed 경로",
+        "Dijkstra 경로",
+        "A* 경로",
+        "알고리즘 비교표",
+        "중증도 상(high) 비율",
+    ]
 )
 
 with tab1:
-    plot_heatmap_discrete("disease_rate", "구역별 병해 발생 비율", label="병해율")
+    plot_heatmap_discrete(
+        "disease_rate",
+        "구역별 병해 발생 비율",
+        label="병해율"
+    )
 
 with tab2:
-    plot_severity_with_arrow(max_steps=path_len)
+    plot_severity_with_algorithm(
+        algorithm="proposed",
+        max_steps=path_len,
+        alpha=route_alpha
+    )
 
 with tab3:
-    plot_heatmap_discrete("sev2_rate", "구역별 중증도 상(high) 비율", label="sev2")
+    plot_severity_with_algorithm(
+        algorithm="dijkstra",
+        max_steps=path_len,
+        alpha=route_alpha
+    )
+
+with tab4:
+    plot_severity_with_algorithm(
+        algorithm="astar",
+        max_steps=path_len,
+        alpha=route_alpha
+    )
+
+with tab5:
+    compare_algorithm_table(
+        max_steps=path_len,
+        alpha=route_alpha
+    )
+
+with tab6:
+    plot_heatmap_discrete(
+        "sev2_rate",
+        "구역별 중증도 상(high) 비율",
+        label="sev2"
+    )
+
 
 # -------------------------------
 # 8. 드론 방제 우선순위 Top-K
