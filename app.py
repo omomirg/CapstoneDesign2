@@ -6,7 +6,7 @@ import matplotlib.colors as mcolors
 import heapq
 
 # ---- 한글 폰트 ----
-plt.rcParams["font.family"] = "Apple SD Gothic Neo"
+plt.rcParams["font.family"] = "NanumGothic"
 plt.rcParams["axes.unicode_minus"] = False
 
 # -------------------------------
