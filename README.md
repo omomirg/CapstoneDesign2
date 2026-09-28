@@ -2,7 +2,7 @@
 
 캡스톤디자인2 팀 프로젝트 (2인) | Python, PyTorch, Streamlit
 
-🔗 **웹 데모:** https://capstonedesign2-zue4w32e4ezdgznykxmkcl.streamlit.app
+🔗 https://capstonedesign2-zue4w32e4ezdgznykxmkcl.streamlit.app
 
 잎 이미지로 흰가루병 유무와 중증도를 예측하고, 그 결과를 가상 온실 구역 지도에 옮겨 **어느 구역부터 방제해야 하는지**와 **감염이 퍼졌을 가능성이 높은 경로**를 보여주는 시스템입니다.
 
